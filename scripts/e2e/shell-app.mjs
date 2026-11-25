@@ -31,6 +31,7 @@ const STRINGS = {
     untitled: 'Untitled.docx',
     discard: "Don't save",
     ask: 'Save changes to {name}?',
+    closeTab: 'Close {name}',
     statusPage: 'Page {page} of {pages}',
     statusWords: '{words} words',
   },
@@ -61,6 +62,7 @@ const STRINGS = {
     untitled: '未命名.docx',
     discard: '不保存',
     ask: '是否保存对 {name} 的更改？',
+    closeTab: '关闭 {name}',
     statusPage: '第 {page} 页，共 {pages} 页',
     statusWords: '{words} 个字',
   },
@@ -283,7 +285,7 @@ await check('every toolbar control is found by its accessible name', async () =>
   fileMenuItem(ui.new)
   requireControl(ui.new, 'BUTTON')
   requireControl(ui.open, 'BUTTON')
-  assert(labeled(ui.new).title === null, 'new has no keymap chord')
+  assert(labeled(ui.new).title === null, 'the New row shows its chord as a hint, not a tooltip')
   closeFileMenu()
   const buttons = [
     'undo', 'redo', 'bold', 'italic', 'underline', 'strike',
@@ -388,18 +390,40 @@ await check('the window title carries the dirty mark after an edit', async () =>
   assert(title.includes('basic.docx'), `title ${title}`)
 })
 
-await check('new document clears the file and the dirty mark', async () => {
+function tabsInfo() {
+  return evaluate(`[...document.querySelectorAll('#tabs .tab')].map((tab) => ({
+    label: tab.querySelector('.tab-label').textContent,
+    active: tab.getAttribute('aria-selected') === 'true',
+    dirty: tab.classList.contains('dirty'),
+  }))`)
+}
+
+await check('new document opens a clean tab beside the dirty one', async () => {
   act(fileMenuItem(ui.new), 'click')
-  const asked = dialogInfo()
-  assert(asked && asked.hidden === false, 'New on a dirty document asks')
-  assert(asked.name === fill(ui.ask, { name: 'basic.docx' }), `dialog name ${asked.name}`)
-  act(buttonNamed(ui.discard), 'click')
+  assert(dialogInfo() === null, 'New does not ask: the dirty document stays in its tab')
   const title = evaluate('document.title')
   const text = bodyText()
-  console.log(`  new title ${JSON.stringify(title)} text ${JSON.stringify(text)}`)
+  const tabs = tabsInfo()
+  console.log(`  new title ${JSON.stringify(title)} text ${JSON.stringify(text)} tabs ${JSON.stringify(tabs)}`)
   assert(title.includes(ui.untitled), `title ${title}`)
   assert(!title.includes('•'), `title ${title}`)
   assert(text === '', `new document text ${JSON.stringify(text)}`)
+  assert(tabs.length === 2, `two tabs ${JSON.stringify(tabs)}`)
+  assert(tabs[0].label === 'basic' && tabs[0].dirty && !tabs[0].active, `first tab ${JSON.stringify(tabs[0])}`)
+  assert(tabs[1].active && !tabs[1].dirty, `second tab ${JSON.stringify(tabs[1])}`)
+})
+
+await check('closing the dirty tab asks, and Don\'t save drops it', async () => {
+  act(buttonNamed(fill(ui.closeTab, { name: 'basic' })), 'click')
+  const asked = dialogInfo()
+  assert(asked && asked.hidden === false, 'closing a dirty tab asks')
+  assert(asked.name === fill(ui.ask, { name: 'basic.docx' }), `dialog name ${asked.name}`)
+  act(buttonNamed(ui.discard), 'click')
+  await until(`document.querySelectorAll('#tabs .tab').length === 1`, { label: 'one tab left' })
+  const title = evaluate('document.title')
+  assert(title.includes(ui.untitled) && !title.includes('•'), `title ${title}`)
+  assert(bodyText() === '', 'the untitled tab is the one left')
+  assert(evaluate(`document.querySelectorAll('#pages > .doc-host').length`) === 1, 'the closed tab took its host with it')
 })
 
 await check('open by picker loads the chosen document', async () => {

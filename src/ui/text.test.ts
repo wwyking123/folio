@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  afterClose,
   canSave,
+  cycleTab,
   commandTitle,
   fileHandleFromRequest,
   fontOptions,
@@ -9,10 +11,12 @@ import {
   formatTitle,
   isAbort,
   isDirty,
+  nextUntitled,
   sizeOptions,
   statusText,
   stepZoom,
   styleOptions,
+  tabLabel,
   zoomAtEnd,
   ZOOM_PERCENTS,
 } from './text.ts'
@@ -22,6 +26,8 @@ const translate: Translate = (key, values = {}) => {
   const templates: Record<string, string> = {
     'status.page': 'Page {page} of {pages}',
     'status.words': '{words} words',
+    untitled: 'Untitled.docx',
+    'untitled.n': 'Untitled {n}.docx',
   }
   const text = templates[key] ?? key
   return text.replace(/\{(\w+)\}/g, (all, name: string) => {
@@ -160,4 +166,32 @@ test('sizeOptions keeps the fixed list, and inserts another size in order', () =
   assert.deepEqual(sizeOptions(13), [8, 9, 10, 10.5, 11, 12, 13, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72])
   assert.deepEqual(sizeOptions(7), [7, ...FONT_SIZES])
   assert.deepEqual(sizeOptions(80), [...FONT_SIZES, 80])
+})
+
+test('tabLabel drops the .docx extension and keeps any other name', () => {
+  assert.equal(tabLabel('Report.docx'), 'Report')
+  assert.equal(tabLabel('REPORT.DOCX'), 'REPORT')
+  assert.equal(tabLabel('notes.txt'), 'notes.txt')
+  assert.equal(tabLabel('.docx'), '.docx', 'a name that is only the extension stays whole')
+})
+
+test('nextUntitled takes the plain name first, then the lowest free number', () => {
+  assert.equal(nextUntitled([], translate), 'Untitled.docx')
+  assert.equal(nextUntitled(['Untitled.docx'], translate), 'Untitled 2.docx')
+  assert.equal(nextUntitled(['Untitled.docx', 'Untitled 2.docx', 'Untitled 4.docx'], translate), 'Untitled 3.docx')
+  assert.equal(nextUntitled(['Untitled 2.docx', 'a.docx'], translate), 'Untitled.docx', 'a closed first tab frees the plain name')
+})
+
+test('afterClose keeps the active tab, or moves to the right neighbor of the closing one', () => {
+  assert.equal(afterClose(['a', 'b', 'c'], 'b', 'b'), 'c')
+  assert.equal(afterClose(['a', 'b', 'c'], 'c', 'c'), 'b', 'the last tab falls back to its left neighbor')
+  assert.equal(afterClose(['a', 'b', 'c'], 'a', 'c'), 'c', 'closing a background tab keeps the active one')
+  assert.equal(afterClose(['a'], 'a', 'a'), null, 'nothing is left')
+})
+
+test('cycleTab wraps at both ends', () => {
+  assert.equal(cycleTab(['a', 'b', 'c'], 'c', 1), 'a')
+  assert.equal(cycleTab(['a', 'b', 'c'], 'a', -1), 'c')
+  assert.equal(cycleTab(['a', 'b', 'c'], 'b', 1), 'c')
+  assert.equal(cycleTab(['a'], 'a', 1), 'a')
 })

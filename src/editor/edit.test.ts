@@ -337,7 +337,8 @@ test('lists toggle, join a neighbor, and backspace removes numbering before merg
   assert.equal(def?.fresh, true, 'the list definition is fresh')
   assert.equal(def?.levels.length, 9, 'the list has nine levels')
   assert.equal(def?.levels[0]?.text, '•', 'the first level is a bullet')
-  assert.equal(def?.levels[0]?.indentLeft, pt(36), 'the first level indents 36pt')
+  assert.equal(def?.levels[0]?.indentLeft, pt(21), 'the first level indents 21pt')
+  assert.equal(def?.levels[0]?.hanging, pt(21), 'the marker hangs back to the margin')
   state = run(state, toggleList('bullet'))
   assert.equal(asParagraph(state.doc.body[0]).props.numbering, null, 'toggling the same kind removes numbering')
 
@@ -396,6 +397,8 @@ test('paragraph formatting updates style, alignment, spacing, and indent', () =>
   state = run(state, changeIndentLevel(-1))
   state = run(state, changeIndentLevel(-1))
   assert.equal(asParagraph(state.doc.body[0]).props.indent?.left, pt(0), 'indent does not go below zero')
+  state = run(state, toggleList('decimal'))
+  assert.equal(asParagraph(state.doc.body[0]).props.indent?.left, undefined, 'entering a list clears direct left indent so the list level indents')
 
   let listed = run(initialState(makeDoc([paragraph('p', [text('ab')])])), toggleList('bullet'))
   listed = run(listed, changeIndentLevel(1))

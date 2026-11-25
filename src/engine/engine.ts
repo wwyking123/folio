@@ -145,6 +145,8 @@ export type Source = {
   addFontAlias(requested: string, loaded: string): void
   addMedia(file: Blob): Promise<AddedMedia>
   imageUrl(key: MediaKey): string
+  /** The bytes of one picture, from the file or added this session. Null when the key names none. */
+  mediaBlob(key: MediaKey): Blob | null
   /** Resolved run look for the paragraph's styles, with these direct marks overlaid. */
   look(para: Paragraph, marks: Marks): RunLook
   /** Resolved paragraph look: the style, then the level's left and hanging indent from the given list table, then direct props. */
@@ -356,6 +358,11 @@ function bindSource(
       const url = URL.createObjectURL(new Blob([new Uint8Array(held.bytes)], { type: held.contentType }))
       urls.set(key, url)
       return url
+    },
+    mediaBlob(key) {
+      const held = added.get(key) ?? takeSessionMedia(session, key)
+      if (held === undefined) return null
+      return new Blob([new Uint8Array(held.bytes)], { type: held.contentType })
     },
     look(para, marks) {
       return overlayRun(runLookFor(looks, opened, para, marks.charStyle), marks)
@@ -2050,16 +2057,29 @@ function elementSize(bytes: Uint8Array, contentType: string): Promise<{ width: n
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(new Blob([bytes.slice()], { type: contentType }))
     const image = new Image()
-    image.onload = () => {
+    // acdert does not fetch or decode a detached <img>; mounting it off-screen drives onload and onerror.
+    const body = typeof document !== 'undefined' ? document.body : null
+    if (body) {
+      image.setAttribute('aria-hidden', 'true')
+      image.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none'
+      body.append(image)
+    }
+    const cleanup = (): void => {
+      if (image.isConnected) image.remove()
       URL.revokeObjectURL(url)
-      if (image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+    }
+    image.onload = () => {
+      const width = image.naturalWidth
+      const height = image.naturalHeight
+      cleanup()
+      if (width <= 0 || height <= 0) {
         reject(new Error('undecodable image'))
         return
       }
-      resolve({ width: image.naturalWidth, height: image.naturalHeight })
+      resolve({ width, height })
     }
     image.onerror = () => {
-      URL.revokeObjectURL(url)
+      cleanup()
       reject(new Error('undecodable image'))
     }
     image.src = url

@@ -90,18 +90,23 @@ function dialogInfo() {
   })()`)
 }
 
-function discardUnsaved() {
+// New opened a tab beside the dirty document. Close the dirty one without saving so one editor is left.
+async function discardUnsaved() {
   const lang = evaluate('document.documentElement.lang')
-  const title = evaluate('document.title')
-  const named = /^• (.+) - Folio$/.exec(title)
-  assert(named, `dirty title ${title}`)
-  const fileName = named[1]
-  const ask = lang === 'zh' ? `是否保存对 ${fileName} 的更改？` : `Save changes to ${fileName}?`
+  const dirty = evaluate(`(() => {
+    const tab = document.querySelector('#tabs .tab.dirty:not(.active)')
+    return tab ? { label: tab.querySelector('.tab-label').textContent, name: tab.title } : null
+  })()`)
+  assert(dirty, 'the dirty document kept its tab')
+  const close = lang === 'zh' ? `关闭 ${dirty.label}` : `Close ${dirty.label}`
+  const ask = lang === 'zh' ? `是否保存对 ${dirty.name} 的更改？` : `Save changes to ${dirty.name}?`
   const discard = lang === 'zh' ? '不保存' : "Don't save"
+  act(buttonNamed(close), 'click')
   const info = dialogInfo()
-  assert(info && info.hidden === false, 'New on a dirty document asks')
+  assert(info && info.hidden === false, 'closing a dirty tab asks')
   assert(info.name === ask, `dialog name ${info.name}`)
   act(buttonNamed(discard), 'click')
+  await until(`document.querySelectorAll('#tabs .tab').length === 1`, { label: 'one tab left' })
 }
 
 function inputRef() {
@@ -530,7 +535,7 @@ await check('a point on a tall paragraph hits the line under the pointer', async
     }
   }
   assert(opened, `new document: ${errors.join('\n')}`)
-  discardUnsaved()
+  await discardUnsaved()
   sink = inputRef()
   act(sink, 'focus')
   const text = '改了一个技能，用户的使用方式就变了；'.repeat(120)

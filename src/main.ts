@@ -89,7 +89,10 @@ function installHook(app: {
   // failure, and beforeclose. `acde act w1 close` waits until the window is gone, so a handler that
   // returns false cannot be driven from the CLI and still continue the test.
   window.__word = {
-    editor: app.editor,
+    // The active tab's editor, read at each use, so a hook keeps pointing at the tab on screen.
+    get editor() {
+      return app.editor
+    },
     platform: app.editor.platform,
     openBytes(base64, name) {
       return app.openBytes(bytesFromBase64(base64), name)

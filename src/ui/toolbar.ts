@@ -60,7 +60,8 @@ export function createToolbar(
   root: HTMLElement,
   platform: Platform,
   handlers: ToolbarHandlers,
-  scroller: HTMLElement,
+  /** The active tab's page scroller, which the table strip keeps still when it shows or hides. */
+  scrollerNow: () => HTMLElement,
 ): ToolbarView {
   root.setAttribute('aria-label', t('toolbar'))
   let painting = false
@@ -266,6 +267,7 @@ export function createToolbar(
       root.classList.toggle('with-table', show)
       return
     }
+    const scroller = scrollerNow()
     const previous = scroller.style.overflowAnchor
     if (shift) scroller.style.overflowAnchor = 'none'
     try {
@@ -329,10 +331,10 @@ export function createToolbar(
 }
 
 function fileCommands(handlers: ToolbarHandlers): Readonly<Record<FileMenuId, FileMenuCommand>> {
-  // Open has no keymap chord, so the menu shows none. shortcutChord is the only source.
+  // shortcutChord is the only source of the chord a menu row shows.
   return {
-    new: { label: t('new'), icon: 'doc', shortcut: null, showTitle: false, run: () => handlers.onNew() },
-    open: { label: t('open'), icon: 'folder', shortcut: null, showTitle: false, run: () => handlers.onOpen() },
+    new: { label: t('new'), icon: 'doc', shortcut: 'new', showTitle: false, run: () => handlers.onNew() },
+    open: { label: t('open'), icon: 'folder', shortcut: 'open', showTitle: false, run: () => handlers.onOpen() },
     save: { label: t('save'), icon: 'save', shortcut: 'save', showTitle: true, run: () => handlers.onSave() },
     saveAs: { label: t('saveAs'), icon: 'save-as', shortcut: 'saveAs', showTitle: true, run: () => handlers.onSaveAs() },
     pageSetup: { label: t('pageSetup'), icon: 'page-setup', shortcut: null, showTitle: true, run: () => handlers.onPageSetup() },

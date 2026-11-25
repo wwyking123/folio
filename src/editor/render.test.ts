@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { BorderEdge, BorderLine, CellBorders, LineSpacing, Pt, Row, RunLook, Section, Table, TableBorders } from '../model.ts'
 import { cell, paragraph, pt, row, table, text, hex } from './testkit.ts'
-import { cellBoxShadow, cellEdges, cellPadPt, collapsedSpaceBefore, pageBoxStyle, paintFamily, paintedCellEdges, rowFrame, scriptSegments, snapLinePx } from './render.ts'
+import { cellBoxShadow, cellEdges, cellPadPt, collapsedSpaceBefore, markerBoxPx, pageBoxStyle, paintFamily, paintedCellEdges, preeditRunStyle, rowFrame, scriptSegments, snapLinePx } from './render.ts'
+import type { RenderContext } from './render.ts'
 
 const look = {
   fonts: { ascii: 'Times', hAnsi: 'TimesHigh', eastAsia: 'SimSun', cs: 'Naskh' },
@@ -264,4 +265,40 @@ test('cell padding is the Word default, then the table, then the cell', () => {
   assert.deepEqual(cellPadPt(withTable, plain), { top: 1, right: 2, bottom: 3, left: 4 })
   const over = { ...plain, margins: { top: pt(0), left: pt(8) } }
   assert.deepEqual(cellPadPt(withTable, over), { top: 0, right: 2, bottom: 3, left: 8 }, 'an explicit 0 overrides the table')
+})
+
+test('preeditRunStyle uses the ASCII face for pinyin and the East Asian face for Han at the caret marks', () => {
+  const para = paragraph('p', [text('你是谁')])
+  const ctx: RenderContext = {
+    look: (_p, marks) => ({
+      ...look,
+      fonts: { ascii: 'Calibri', hAnsi: 'Calibri', eastAsia: 'Calibri', cs: 'Times New Roman' },
+      sizePt: marks.sizePt ?? pt(11),
+      bold: marks.bold === true,
+    }),
+    paraLook: () => {
+      throw new Error('unused')
+    },
+    fontStack: (family) => `stack:${family}`,
+    lineHeightPx: () => 20,
+    cjkGlyphs: () => false,
+    marker: () => null,
+    imageUrl: () => '',
+    gridPitchPx: null,
+  }
+  const pinyin = preeditRunStyle(ctx, para, { sizePt: pt(12), bold: true }, "ni'zai'na")
+  assert.equal(pinyin.slot, 'ascii')
+  assert.equal(pinyin.fontFamily, 'stack:Calibri')
+  assert.equal(pinyin.fontSizePx, 16)
+  assert.equal(pinyin.fontWeight, '700')
+  const han = preeditRunStyle(ctx, para, {}, '你在哪')
+  assert.equal(han.slot, 'eastAsia')
+  assert.equal(han.fontFamily, 'stack:宋体')
+  assert.equal(han.fontSizePx, 11 * (4 / 3))
+})
+
+test('markerBoxPx keeps paragraph padding past the marker even when left or hanging is zero', () => {
+  assert.deepEqual(markerBoxPx(48, 24), { markerLeft: 24, markerWidth: 24, paddingLeft: 48 })
+  assert.deepEqual(markerBoxPx(0, 24), { markerLeft: 0, markerWidth: 24, paddingLeft: 24 })
+  assert.deepEqual(markerBoxPx(16, 0), { markerLeft: 16, markerWidth: 24, paddingLeft: 40 })
 })

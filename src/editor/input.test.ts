@@ -6,14 +6,20 @@ import { apply, compositionDelete, initialState, insertTable, insertText, select
 import type { EditorState } from './edit.ts'
 import {
   buildKeymap,
+  caretAtPreeditEnd,
   chordOf,
   defaultKeymap,
+  hostPreeditBox,
+  isHostPreeditStyle,
   detectPlatform,
   dragEndpoints,
   dragUnit,
   gestureOffsets,
   IDLE,
+  isPictureFile,
   paragraphRange,
+  pastePlan,
+  PICTURE_TEXT,
   planBeforeInput,
   shortcutChord,
   trackGoal,
@@ -166,7 +172,29 @@ test('the keymap reaches every visual motion, with and without Shift, plus undo,
     const ops = actions.flatMap(action => action.kind === 'clipboard' ? [action.op] : [])
     assert.deepEqual([...new Set(ops)].sort(), ['copy', 'cut', 'paste'], `clipboard on ${platform}`)
     const files = actions.flatMap(action => action.kind === 'file' ? [action.op] : [])
-    assert.deepEqual([...new Set(files)].sort(), ['save', 'saveAs'], `file on ${platform}`)
+    assert.deepEqual(
+      [...new Set(files)].sort(),
+      ['closeTab', 'new', 'nextTab', 'open', 'prevTab', 'save', 'saveAs'],
+      `file and tab chords on ${platform}`,
+    )
+  }
+})
+
+test('tab chords sit on Ctrl on both platforms, and new, open and close on the primary modifier', () => {
+  const op = (platform: Platform, chord: string): string | null => {
+    const action = keymaps[platform].get(chord)
+    return action?.kind === 'file' ? action.op : null
+  }
+  assert.equal(op('mac', 'ctrl+tab'), 'nextTab')
+  assert.equal(op('mac', 'ctrl+shift+tab'), 'prevTab')
+  assert.equal(op('other', 'mod+tab'), 'nextTab', 'Ctrl reads as mod off macOS')
+  assert.equal(op('other', 'mod+shift+tab'), 'prevTab')
+  for (const platform of PLATFORMS) {
+    assert.equal(op(platform, 'mod+n'), 'new', platform)
+    assert.equal(op(platform, 'mod+o'), 'open', platform)
+    assert.equal(op(platform, 'mod+w'), 'closeTab', platform)
+    assert.equal(shortcutChord(platform, 'new'), 'mod+n', platform)
+    assert.equal(shortcutChord(platform, 'open'), 'mod+o', platform)
   }
 })
 
@@ -366,6 +394,36 @@ const compositionEnd: ModeEvent = { kind: 'compositionEnd' }
 const pointerDown = (unit: DragUnit = 'char'): ModeEvent => ({ kind: 'pointerDown', at: elsewhere, unit })
 const pointerUp: ModeEvent = { kind: 'pointerUp' }
 const reset: ModeEvent = { kind: 'reset' }
+
+test('the runtime composition span is recognized by the style it is given', () => {
+  const host = 'position:fixed;left:10px;top:20px;height:16px;line-height:16px;z-index:2147483647;text-decoration:underline;background:Canvas;color:CanvasText;pointer-events:none;white-space:pre'
+  const cssom = 'position: fixed; left: 10px; top: 20px; height: 16px; line-height: 16px; z-index: 2147483647; text-decoration: underline; background: Canvas; color: CanvasText; pointer-events: none; white-space: pre;'
+  assert.equal(isHostPreeditStyle(host), true)
+  assert.equal(isHostPreeditStyle(cssom), true)
+  assert.equal(isHostPreeditStyle('position:fixed;z-index:2147483647;border-radius:12px'), false)
+})
+
+test('the runtime preedit shifts onto the paragraph baseline at the active zoom', () => {
+  assert.deepEqual(
+    hostPreeditBox({ left: 96, top: 37 }, { deltaTop: 2.25, height: 15 }, 1),
+    { left: 96, top: 39.25, height: 15 },
+  )
+  assert.deepEqual(
+    hostPreeditBox({ left: 192, top: 74 }, { deltaTop: 2.25, height: 15 }, 2),
+    { left: 192, top: 78.5, height: 30 },
+  )
+})
+
+test('the caret sits at the end of the runtime preedit, in overlay pixels', () => {
+  assert.deepEqual(
+    caretAtPreeditEnd({ right: 140, top: 80, height: 20 }, { left: 40, top: 60, width: 200, offsetWidth: 200 }),
+    { left: 100, top: 20, height: 20 },
+  )
+  assert.deepEqual(
+    caretAtPreeditEnd({ right: 240, top: 160, height: 40 }, { left: 80, top: 120, width: 400, offsetWidth: 200 }),
+    { left: 80, top: 20, height: 20 },
+  )
+})
 
 test('a composition starts at the remembered caret and ends back at idle', () => {
   const started = transition(IDLE, compositionStart)
@@ -659,4 +717,24 @@ test('every mode and event pair returns a mode without throwing', () => {
       assert.ok(['idle', 'composing', 'dragging'].includes(next.kind), `${mode.kind} then ${event.kind}`)
     }
   }
+})
+
+test('a paste takes picture files first, then the held picture for its own mark, then text', () => {
+  const held = { text: PICTURE_TEXT }
+  assert.equal(pastePlan('words', 1, held), 'files', 'a picture on the clipboard wins over its text')
+  assert.equal(pastePlan(PICTURE_TEXT, 0, held), 'held', 'the mark this app wrote brings the picture back')
+  assert.equal(pastePlan(PICTURE_TEXT, 0, null), 'text', 'the mark with nothing held is only a character')
+  assert.equal(pastePlan('words', 0, held), 'text', 'text copied elsewhere since is typed, not the old picture')
+  assert.equal(pastePlan('', 0, held), 'none', 'an empty clipboard does not bring the old picture back')
+  assert.equal(pastePlan('', 0, null), 'none')
+})
+
+test('isPictureFile accepts PNG and JPEG by type, and by name only when the type is empty', () => {
+  assert.equal(isPictureFile({ type: 'image/png', name: 'a.png' }), true)
+  assert.equal(isPictureFile({ type: 'image/jpeg' }), true)
+  assert.equal(isPictureFile({ type: '', name: 'shot.JPG' }), true)
+  assert.equal(isPictureFile({ type: '', name: 'shot.jpeg' }), true)
+  assert.equal(isPictureFile({ type: '', name: 'notes.txt' }), false)
+  assert.equal(isPictureFile({ type: 'image/gif', name: 'a.gif' }), false)
+  assert.equal(isPictureFile({ type: 'application/pdf', name: 'a.png' }), false)
 })

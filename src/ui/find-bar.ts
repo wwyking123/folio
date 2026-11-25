@@ -20,7 +20,8 @@ export interface FindBar {
 
 const ATOM = '\uFFFC'
 
-export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
+/** `editor` reads the active tab's editor at each use, so the bar follows the tab on screen. */
+export function createFindBar(editor: () => Editor, pages: HTMLElement): FindBar {
   const root = document.createElement('div')
   root.className = 'findbar'
   root.hidden = true
@@ -101,7 +102,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
     if (!shown) return
     place()
     const query = queryInput.value
-    const doc = editor.state.doc
+    const doc = editor().state.doc
     const queryChanged = query !== seenQuery || caseOn !== seenCase || wordOn !== seenWord
     const docChanged = doc !== seenDoc
     const jump = queryChanged || relocate
@@ -115,7 +116,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
     if (query.length === 0) {
       matches = []
       current = -1
-      editor.setFindHits([], -1)
+      editor().setFindHits([], -1)
       paint()
       return
     }
@@ -128,10 +129,10 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
   function land(): void {
     if (matches.length === 0) {
       current = -1
-      editor.setFindHits([], -1)
+      editor().setFindHits([], -1)
       return
     }
-    const at = matchFrom(editor.state.doc, matches, earlier(editor.state.sel))
+    const at = matchFrom(editor().state.doc, matches, earlier(editor().state.sel))
     choose(at < 0 ? 0 : at)
   }
 
@@ -140,20 +141,20 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
     if (equal >= 0) current = equal
     else if (matches.length === 0) current = -1
     else {
-      const sel = editor.state.sel
+      const sel = editor().state.sel
       const pos = sel.kind === 'text' ? sel.head : earlier(sel)
-      const at = matchFrom(editor.state.doc, matches, pos)
+      const at = matchFrom(editor().state.doc, matches, pos)
       current = at < 0 ? 0 : at
     }
-    editor.setFindHits(matches, current)
+    editor().setFindHits(matches, current)
   }
 
   function choose(index: number): void {
     const match = matches[index]
     if (!match) return
     current = index
-    editor.setFindHits(matches, current)
-    editor.run(setSelection({
+    editor().setFindHits(matches, current)
+    editor().run(setSelection({
       kind: 'text',
       anchor: { p: match.para, o: match.start },
       head: { p: match.para, o: match.end },
@@ -163,10 +164,10 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
   function move(direction: 1 | -1): void {
     flush()
     if (matches.length === 0) return
-    const sel = editor.state.sel
+    const sel = editor().state.sel
     let index = -1
     if (sel.kind === 'text') {
-      const doc = editor.state.doc
+      const doc = editor().state.doc
       const start = earlier(sel)
       const end = later(sel)
       index = direction > 0 ? matchFrom(doc, matches, end) : matchUntil(doc, matches, start)
@@ -181,7 +182,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
   }
 
   function selectionIs(match: TextMatch): boolean {
-    const sel = editor.state.sel
+    const sel = editor().state.sel
     if (sel.kind !== 'text' || sel.anchor.p !== match.para || sel.head.p !== match.para) return false
     const start = Math.min(sel.anchor.o, sel.head.o)
     const end = Math.max(sel.anchor.o, sel.head.o)
@@ -189,7 +190,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
   }
 
   function selectionIndex(): number {
-    const sel = editor.state.sel
+    const sel = editor().state.sel
     if (sel.kind !== 'text') return -1
     for (let i = 0; i < matches.length; i++) {
       const match = matches[i]
@@ -207,17 +208,17 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
       return
     }
     const replacement = replaceInput.value
-    editor.run(replaceMatch(match, replacement, followingMatch(matches, current, replacement)))
+    editor().run(replaceMatch(match, replacement, followingMatch(matches, current, replacement)))
   }
 
   function replaceEvery(): void {
     flush()
     if (matches.length === 0) return
     const replacement = replaceInput.value
-    const counts = replaceCounts(editor.state.doc, matches, replacement)
+    const counts = replaceCounts(editor().state.doc, matches, replacement)
     if (counts.replaced === 0 && counts.skipped === 0) return
     if (counts.replaced > 0) {
-      editor.run(replaceAllText(queryInput.value, replacement, options()))
+      editor().run(replaceAllText(queryInput.value, replacement, options()))
     }
     held = counts
     paint()
@@ -246,8 +247,8 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
       cancelAnimationFrame(frame)
       frame = 0
     }
-    editor.setFindHits([], -1)
-    if (restoreFocus) editor.focus()
+    editor().setFindHits([], -1)
+    if (restoreFocus) editor().focus()
   }
 
   function setExpanded(value: boolean): void {
@@ -296,30 +297,30 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
 
   function earlier(sel: Selection): Pos {
     if (sel.kind !== 'text') return documentStart()
-    const index = indexOf(editor.state.doc)
+    const index = indexOf(editor().state.doc)
     return comparePos(index, sel.anchor, sel.head) <= 0 ? sel.anchor : sel.head
   }
 
   function later(sel: Selection): Pos {
     if (sel.kind !== 'text') return documentStart()
-    const index = indexOf(editor.state.doc)
+    const index = indexOf(editor().state.doc)
     return comparePos(index, sel.anchor, sel.head) <= 0 ? sel.head : sel.anchor
   }
 
   function documentStart(): Pos {
-    const id = indexOf(editor.state.doc).ordered[0]
+    const id = indexOf(editor().state.doc).ordered[0]
     if (id) return { p: id, o: 0 }
-    const sel = editor.state.sel
+    const sel = editor().state.sel
     if (sel.kind === 'text') return sel.head
     return { p: '' as Pos['p'], o: 0 }
   }
 
   function seedText(): string | null {
-    const sel = editor.state.sel
+    const sel = editor().state.sel
     if (sel.kind !== 'text' || sel.anchor.p !== sel.head.p) return null
     let loc
     try {
-      loc = indexOf(editor.state.doc).get(sel.anchor.p)
+      loc = indexOf(editor().state.doc).get(sel.anchor.p)
     } catch {
       return null
     }
@@ -343,7 +344,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
       replaceOne()
       return
     }
-    const chord = chordOf(event, editor.platform)
+    const chord = chordOf(event, editor().platform)
     if (chord === 'f3' || chord === 'mod+g') {
       event.preventDefault()
       move(1)
@@ -359,7 +360,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
       focusQuery()
       return
     }
-    const replaceChord = editor.platform === 'mac' ? 'ctrl+h' : 'mod+h'
+    const replaceChord = editor().platform === 'mac' ? 'ctrl+h' : 'mod+h'
     if (chord === replaceChord) {
       event.preventDefault()
       setExpanded(true)
@@ -369,7 +370,7 @@ export function createFindBar(editor: Editor, pages: HTMLElement): FindBar {
 
   function onEscape(event: KeyboardEvent): void {
     if (!shown || event.key !== 'Escape') return
-    if (isDialogOpen() || document.querySelector('.file-menu') || editor.dragging()) return
+    if (isDialogOpen() || document.querySelector('.file-menu') || editor().dragging()) return
     event.preventDefault()
     event.stopPropagation()
     close(true)

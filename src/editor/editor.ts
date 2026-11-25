@@ -4,12 +4,12 @@ import { cssStack, fetchMetrics, rememberedFamilies } from '../fonts.ts'
 import type { FontMetrics } from '../fonts.ts'
 import { indexOf } from '../model.ts'
 import type { Block, Doc, Paragraph, ParaId, ParaLook, Pos, Table } from '../model.ts'
-import { apply, initialState, redo as redoState, setSelection, toolbarState, undo as undoState, wordCount } from './edit.ts'
-import type { Command, EditorState, ToolbarState } from './edit.ts'
+import { apply, initialState, insertImage, redo as redoState, selectedImage, setSelection, toolbarState, undo as undoState, wordCount } from './edit.ts'
+import type { Command, EditorState, MediaRef, ToolbarState } from './edit.ts'
 import { attachInput } from './input-dom.ts'
-import type { EditingSurface, InputBinding } from './input-dom.ts'
+import type { EditingSurface, InputBinding, PictureInput } from './input-dom.ts'
 import { detectPlatform } from './input.ts'
-import type { FindOp, Platform } from './input.ts'
+import type { FileOp, FindOp, Platform } from './input.ts'
 import type { TextMatch } from './find.ts'
 import {
   cssGeneric,
@@ -52,8 +52,9 @@ export class Editor implements EditingSurface {
   private readonly sink: HTMLTextAreaElement
   private input: InputBinding | null = null
   private readonly listeners = new Set<() => void>()
-  private readonly fileListeners = new Set<(op: 'save' | 'saveAs') => void>()
+  private readonly fileListeners = new Set<(op: FileOp) => void>()
   private readonly findListeners = new Set<(op: FindOp) => void>()
+  private readonly pictureErrorListeners = new Set<() => void>()
   private session: Source
   private current: EditorState
   private markers: ReadonlyMap<ParaId, string>
@@ -175,6 +176,12 @@ export class Editor implements EditingSurface {
     this.scheduleChange()
   }
 
+  /** The runtime's composition span is painted after the composition event. Slide the caret to its end. */
+  syncCompositionCaret(): void {
+    if (this.destroyed) return
+    this.view.syncHostPreeditCaret()
+  }
+
   /** Called once per animation frame after changes, never per keystroke synchronously. */
   on(event: 'change', listener: () => void): () => void {
     void event
@@ -184,15 +191,15 @@ export class Editor implements EditingSurface {
     }
   }
 
-  /** Save and Save As from the keymap. The app owns the file; this only delivers the request. */
-  onFile(listener: (op: 'save' | 'saveAs') => void): () => void {
+  /** File and tab chords from the keymap. The app owns files and tabs; this only delivers the request. */
+  onFile(listener: (op: FileOp) => void): () => void {
     this.fileListeners.add(listener)
     return () => {
       this.fileListeners.delete(listener)
     }
   }
 
-  fileCommand(op: 'save' | 'saveAs'): void {
+  fileCommand(op: FileOp): void {
     if (this.destroyed) return
     for (const listener of this.fileListeners) listener(op)
   }
@@ -219,6 +226,69 @@ export class Editor implements EditingSurface {
   setFindHits(hits: readonly TextMatch[], current: number): void {
     if (this.destroyed) return
     this.view.setFindHits(hits, current)
+  }
+
+  /** A pasted or dropped file that is not a picture the engine can embed. The app shows the message. */
+  onPictureError(listener: () => void): () => void {
+    this.pictureErrorListeners.add(listener)
+    return () => {
+      this.pictureErrorListeners.delete(listener)
+    }
+  }
+
+  pictureError(): void {
+    if (this.destroyed) return
+    for (const listener of this.pictureErrorListeners) listener()
+  }
+
+  /** The one selected picture with its bytes, for the clipboard. Null when the selection is anything else. */
+  selectedPicture(): PictureInput | null {
+    if (this.destroyed) return null
+    const hit = selectedImage(this.current.doc, this.current.sel)
+    if (!hit || hit.atom.atom.type !== 'image') return null
+    const blob = this.session.mediaBlob(hit.atom.atom.media)
+    if (!blob) return null
+    return { blob, widthPt: hit.atom.atom.widthPt, heightPt: hit.atom.atom.heightPt }
+  }
+
+  /**
+   * Embeds the pictures and inserts them in order, at `at` or at the selection. Each is one undo entry. A blob the
+   * engine refuses is skipped and reported once. A document replaced while the bytes decode gets nothing.
+   */
+  insertPictures(pictures: readonly PictureInput[], at: Pos | null): void {
+    if (this.destroyed || pictures.length === 0) return
+    void this.embedPictures(pictures, at)
+  }
+
+  private async embedPictures(pictures: readonly PictureInput[], at: Pos | null): Promise<void> {
+    const session = this.session
+    const refs: MediaRef[] = []
+    let refused = false
+    for (const picture of pictures) {
+      try {
+        const media = await session.addMedia(picture.blob)
+        refs.push({
+          key: media.key,
+          contentType: media.contentType,
+          widthPx: (picture.widthPt ?? media.widthPt) / 0.75,
+          heightPx: (picture.heightPt ?? media.heightPt) / 0.75,
+        })
+      } catch {
+        refused = true
+      }
+    }
+    if (this.destroyed || this.session !== session) return
+    if (refs.length > 0) {
+      if (at) {
+        try {
+          this.setTextSelection(at, at)
+        } catch {
+          // The paragraph under the pointer went away while the bytes decoded. The selection is where they go.
+        }
+      }
+      for (const ref of refs) this.run(insertImage(ref))
+    }
+    if (refused) this.pictureError()
   }
 
   toolbar(): ToolbarState {
@@ -322,7 +392,11 @@ export class Editor implements EditingSurface {
     if (this.destroyed) return goalX
     const sel = this.current.sel
     if (sel.kind !== 'text') return goalX
-    const moved = this.view.lineMove(sel.head, direction, goalX)
+    const image = !extend ? selectedImage(this.current.doc, sel) : null
+    const origin = image
+      ? { p: image.para.id, o: direction === 'down' ? image.offset + 1 : image.offset }
+      : sel.head
+    const moved = this.view.lineMove(origin, direction, goalX)
     const anchor = extend ? sel.anchor : moved.pos
     this.run(setSelection({ kind: 'text', anchor, head: moved.pos }))
     return moved.goalX
@@ -388,7 +462,7 @@ export class Editor implements EditingSurface {
 
   private paintSelection(scroll: boolean): void {
     const sel = this.current.sel
-    this.view.paint(sel, this.sink)
+    this.view.paint(sel, this.sink, this.current.stored)
     if (scroll && sel.kind === 'text') this.view.scrollIntoView(sel.head)
   }
 

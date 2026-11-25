@@ -21,7 +21,7 @@ import {
   type Command,
   type EditorState,
 } from './edit.ts'
-import { caretSliceY, layoutPlan, nextVerticalLine, pageAtSliceY, pageOfBlock, paginate, tableRowCuts, type Layout, type LayoutPlan, type Measure } from './pages.ts'
+import { atomCaretBox, caretSliceY, layoutPlan, nextVerticalLine, pageAtSliceY, pageOfBlock, paginate, resolveImageHit, tableRowCuts, type ImageHitCandidate, type Layout, type LayoutPlan, type Measure } from './pages.ts'
 import { PT_TO_PX } from './render.ts'
 import { cell, makeDoc, mulberry32, numId, opaqueBlock, page, paragraph, row, section, table, text } from './testkit.ts'
 
@@ -1329,4 +1329,46 @@ test('incremental layout matches a fresh layout for 200 random edits', { timeout
     const checked = checkUpdate(before, after, before === doc ? view : null, `${kind} ${n}`)
     assert.deepEqual([...checked.plan.remeasure], newIds(before.body, after.body), `${kind} ${n} remeasure`)
   }
+})
+
+test('atomCaretBox puts the caret on the requested side of an image at its bottom baseline', () => {
+  const rect = { left: 96, right: 420, top: 100, bottom: 260 }
+  assert.deepEqual(atomCaretBox(rect, false, true, 18), { left: 96, top: 242, height: 18 })
+  assert.deepEqual(atomCaretBox(rect, true, true, 18), { left: 420, top: 242, height: 18 })
+  assert.deepEqual(atomCaretBox({ left: 96, right: 98, top: 100, bottom: 102 }, true, true, 18), { left: 98, top: 100, height: 18 })
+  assert.deepEqual(atomCaretBox({ left: 96, right: 120, top: 100, bottom: 116 }, true, false, 18), { left: 120, top: 100, height: 16 })
+})
+
+test('resolveImageHit places clicks beside and below an image after it without crossing table cells', () => {
+  const id = 'p1' as Paragraph['id']
+  const bodyImg: ImageHitCandidate = {
+    p: id,
+    base: 2,
+    left: 96,
+    right: 720,
+    top: 100,
+    bottom: 340,
+    cell: null,
+    inkBefore: true,
+    inkAfter: false,
+    contentAbove: false,
+    contentBelow: false,
+  }
+  assert.deepEqual(resolveImageHit([bodyImg], 719, 220, 760, 220), { p: id, o: 3 }, 'right margin lands after the image')
+  assert.deepEqual(resolveImageHit([bodyImg], 140, 349, 140, 520), { p: id, o: 3 }, 'blank area below the image lands after it, even on the left side')
+  assert.equal(resolveImageHit([bodyImg], 97, 220, 80, 220), null, 'text before the image keeps its own hit')
+
+  const cellImg: ImageHitCandidate = {
+    ...bodyImg,
+    base: 0,
+    left: 110,
+    right: 190,
+    top: 100,
+    bottom: 160,
+    cell: { left: 100, right: 200, top: 96, bottom: 240 },
+    inkBefore: false,
+  }
+  assert.equal(resolveImageHit([cellImg], 260, 130, 260, 130), null, 'a click in a neighbor cell does not hit this cell\'s image')
+  assert.deepEqual(resolveImageHit([cellImg], 195, 130, 195, 130), { p: id, o: 1 }, 'space to the right inside the same cell lands after the image')
+  assert.deepEqual(resolveImageHit([cellImg], 120, 200, 120, 200), { p: id, o: 1 }, 'empty space below the image inside a tall cell lands after it')
 })

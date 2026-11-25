@@ -27,8 +27,11 @@ export type Action =
   | { readonly kind: 'visual'; readonly motion: VisualMotion; readonly extend: boolean }
   | { readonly kind: 'history'; readonly step: 'undo' | 'redo' }
   | { readonly kind: 'clipboard'; readonly op: 'copy' | 'cut' | 'paste' }
-  | { readonly kind: 'file'; readonly op: 'save' | 'saveAs' }
+  | { readonly kind: 'file'; readonly op: FileOp }
   | { readonly kind: 'find'; readonly op: FindOp }
+
+/** Requests the editor passes up to the app: the file on this tab, and the tab strip around it. */
+export type FileOp = 'save' | 'saveAs' | 'new' | 'open' | 'closeTab' | 'nextTab' | 'prevTab'
 
 export type FindOp = 'open' | 'replace' | 'next' | 'previous'
 
@@ -151,6 +154,8 @@ export type ShortcutName =
   | 'redo'
   | 'save'
   | 'saveAs'
+  | 'new'
+  | 'open'
   | 'superscript'
   | 'subscript'
   | 'clearFormatting'
@@ -241,6 +246,9 @@ export function defaultKeymap(platform: Platform): Keymap {
     ['mod+shift+z', { kind: 'history', step: 'redo' }],
     ['mod+s', { kind: 'file', op: 'save' }],
     ['mod+shift+s', { kind: 'file', op: 'saveAs' }],
+    ['mod+n', { kind: 'file', op: 'new' }],
+    ['mod+o', { kind: 'file', op: 'open' }],
+    ['mod+w', { kind: 'file', op: 'closeTab' }],
     ['mod+c', { kind: 'clipboard', op: 'copy' }],
     ['mod+x', { kind: 'clipboard', op: 'cut' }],
     ['mod+v', { kind: 'clipboard', op: 'paste' }],
@@ -260,7 +268,12 @@ export function defaultKeymap(platform: Platform): Keymap {
     ...extendable('alt+arrowup', step('backward', 'paragraph')),
     ...extendable('alt+arrowdown', step('forward', 'paragraph')),
   ]
-  return buildKeymap(platform === 'mac' ? [...common, ...mac] : common)
+  const ctrl = platform === 'mac' ? 'ctrl' : 'mod'
+  const tabs: Binding[] = [
+    [`${ctrl}+tab`, { kind: 'file', op: 'nextTab' }],
+    [`${ctrl}+shift+tab`, { kind: 'file', op: 'prevTab' }],
+  ]
+  return buildKeymap(platform === 'mac' ? [...common, ...tabs, ...mac] : [...common, ...tabs])
 }
 
 export { wordRange }
@@ -368,6 +381,51 @@ const COMPOSITION_INPUT: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * The acde runtime paints the composition itself: a fixed span at the textarea caret, solid underline,
+ * `background:Canvas`. The editor used to paint a second, dotted copy in the paragraph and then move the
+ * textarea to the end of that copy, so the runtime drew the same pinyin again. The runtime's span is the one
+ * that matches the system candidate window.
+ */
+export function isHostPreeditStyle(style: string): boolean {
+  const compact = style.replace(/\s+/g, '')
+  return compact.includes('background:Canvas')
+    && compact.includes('text-decoration:underline')
+    && compact.includes('white-space:pre')
+}
+
+/**
+ * Places the runtime's fixed composition span on the paragraph's baseline. `anchor` is the collapsed caret rect in
+ * viewport pixels; `metric` is the 1x inline offset (`preedit.top - anchor.top`) and content height measured side by
+ * side on one baseline.
+ */
+export function hostPreeditBox(
+  anchor: { readonly left: number; readonly top: number },
+  metric: { readonly deltaTop: number; readonly height: number },
+  zoom: number,
+): { readonly left: number; readonly top: number; readonly height: number } {
+  const z = zoom > 0 ? zoom : 1
+  return {
+    left: anchor.left,
+    top: anchor.top + metric.deltaTop * z,
+    height: Math.max(metric.height * z, 1),
+  }
+}
+
+/** Caret at the right edge of the runtime preedit, in the overlay's own pixels. `width` is the laid-out box. */
+export function caretAtPreeditEnd(
+  span: { readonly right: number; readonly top: number; readonly height: number },
+  overlay: { readonly left: number; readonly top: number; readonly width: number; readonly offsetWidth: number },
+): { readonly left: number; readonly top: number; readonly height: number } {
+  const scale = overlay.offsetWidth > 0 ? overlay.width / overlay.offsetWidth : 1
+  const z = scale > 0 ? scale : 1
+  return {
+    left: (span.right - overlay.left) / z,
+    top: (span.top - overlay.top) / z,
+    height: Math.max(span.height / z, 1),
+  }
+}
+
+/**
  * What a `beforeinput` should do. Composition is left to the composition events, including when a commit's
  * `insertText` arrives after `compositionend` has already been classified as a composition type.
  * While `composing` is true every type is left alone, so the textarea can hold the preedit.
@@ -393,4 +451,28 @@ export function planBeforeInput(inputType: string, data: string | null, composin
 /** `MacIntel` and a Macintosh user agent are mac; Dopame OS reports a Linux platform and is `other`. */
 export function detectPlatform(platform: string, userAgent = ''): Platform {
   return /mac/i.test(platform) || /mac/i.test(userAgent) ? 'mac' : 'other'
+}
+
+/** What the clipboard's plain text holds for one copied picture: the object replacement character. */
+export const PICTURE_TEXT = '\uFFFC'
+
+/** True for a file the engine can embed as a picture. The engine still checks the bytes. */
+export function isPictureFile(file: { readonly type: string; readonly name?: string }): boolean {
+  if (file.type === 'image/png' || file.type === 'image/jpeg') return true
+  if (file.type !== '') return false
+  return /\.(png|jpe?g)$/i.test(file.name ?? '')
+}
+
+/**
+ * What a paste inserts. Picture files on the clipboard win. Text that is the mark this app wrote for a copied
+ * picture brings that picture back, since the runtime's clipboard carries text only. Any other text is typed.
+ */
+export function pastePlan(
+  text: string,
+  pictureFiles: number,
+  held: { readonly text: string } | null,
+): 'files' | 'held' | 'text' | 'none' {
+  if (pictureFiles > 0) return 'files'
+  if (held && text === held.text) return 'held'
+  return text.length > 0 ? 'text' : 'none'
 }

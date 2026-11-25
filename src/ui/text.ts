@@ -186,3 +186,39 @@ export function fileHandleFromRequest(request: {
 export function isAbort(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError'
 }
+
+/** A tab shows the file name without its `.docx` extension. The window title keeps the full name. */
+export function tabLabel(name: string): string {
+  const stripped = name.replace(/\.docx$/i, '')
+  return stripped.length > 0 ? stripped : name
+}
+
+/**
+ * The name for the next new document: the plain untitled name when no open tab uses it, else the lowest
+ * free "untitled N" from 2 up, the way Word numbers its new windows.
+ */
+export function nextUntitled(open: readonly string[], translate: Translate): string {
+  const used = new Set(open)
+  const first = translate('untitled')
+  if (!used.has(first)) return first
+  for (let n = 2; ; n++) {
+    const name = translate('untitled.n', { n })
+    if (!used.has(name)) return name
+  }
+}
+
+/** The tab to show after `closing` goes: the active one if another tab is closing, else its right neighbor, else its left. */
+export function afterClose<T>(order: readonly T[], closing: T, active: T): T | null {
+  const rest = order.filter(item => item !== closing)
+  if (rest.length === 0) return null
+  if (closing !== active) return active
+  const at = order.indexOf(closing)
+  return rest[Math.min(at, rest.length - 1)] ?? null
+}
+
+/** The tab `step` places along from `active`, wrapping at either end. */
+export function cycleTab<T>(order: readonly T[], active: T, step: 1 | -1): T {
+  const at = order.indexOf(active)
+  if (at < 0 || order.length === 0) return active
+  return order[(at + step + order.length) % order.length] ?? active
+}

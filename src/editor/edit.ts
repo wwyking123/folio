@@ -2585,9 +2585,18 @@ function marksEqual(a: Marks, b: Marks): boolean {
     && a.highlight === b.highlight && a.vertAlign === b.vertAlign && a.charStyle === b.charStyle && a.link === b.link
 }
 
+function withoutListIndent(indent: ParaProps['indent']): ParaProps['indent'] {
+  if (!indent || (indent.left === undefined && indent.hanging === undefined)) return indent
+  const { left: _left, hanging: _hanging, ...rest } = indent
+  return Object.keys(rest).length > 0 ? rest : undefined
+}
+
 function withNumbering(para: Paragraph, numbering: ParaProps['numbering']): Paragraph {
-  if (para.props.numbering === numbering) return para
-  return { ...para, props: { ...para.props, numbering } }
+  const indent = withoutListIndent(para.props.indent)
+  if (para.props.numbering === numbering && indent === para.props.indent) return para
+  const { indent: _dropped, ...rest } = para.props
+  const props: ParaProps = indent === undefined ? { ...rest, numbering } : { ...rest, indent, numbering }
+  return { ...para, props }
 }
 
 function listInfo(doc: Doc, para: Paragraph): { num: NumId, level: number } | null {
@@ -2636,8 +2645,10 @@ function freshList(kind: 'bullet' | 'decimal'): ListDef {
       format: kind,
       text: kind === 'bullet' ? '•' : `%${level + 1}.`,
       start: 1,
-      indentLeft: asPt(36 * (level + 1)),
-      hanging: asPt(18),
+      // Word's default list: the marker sits on the margin (left - hanging = 0) and the text starts 21pt in;
+      // each deeper level steps in by the same 21pt.
+      indentLeft: asPt(21 * (level + 1)),
+      hanging: asPt(21),
     })
   }
   return { fresh: true, levels }

@@ -15,12 +15,15 @@ import {
   dragEndpoints,
   dragUnit,
   IDLE,
+  isPictureFile,
   isVerticalMotion,
+  pastePlan,
+  PICTURE_TEXT,
   planBeforeInput,
   trackGoal,
   transition,
 } from './input.ts'
-import type { Action, DragUnit, FindOp, InputMode, Platform } from './input.ts'
+import type { Action, DragUnit, FileOp, FindOp, InputMode, Platform } from './input.ts'
 import type { Decoration } from './render.ts'
 
 /** The slice of the facade the DOM layer is allowed to see. Page geometry stays behind these names. */
@@ -31,6 +34,8 @@ export interface EditingSurface {
   undo(): boolean
   redo(): boolean
   setPreedit(deco: Decoration | null): void
+  /** Puts the caret at the end of the runtime's composition span. No-op when that span is absent. */
+  syncCompositionCaret(): void
   focus(): void
   positionAtPoint(clientX: number, clientY: number): Pos | null
   caretColumn(): number | null
@@ -38,12 +43,59 @@ export interface EditingSurface {
   movePage(direction: 'up' | 'down', extend: boolean, goalX: number | null): number | null
   moveToLineEdge(edge: 'start' | 'end', extend: boolean): void
   setTextSelection(anchor: Pos, head: Pos): void
-  fileCommand(op: 'save' | 'saveAs'): void
+  fileCommand(op: FileOp): void
   findCommand(op: FindOp): void
   zoom(): number
   imageBox(pos: Pos): PageBox | null
   previewImage(preview: ImageGesture | null): void
   setNotice(text: string | null): void
+  selectedPicture(): PictureInput | null
+  insertPictures(pictures: readonly PictureInput[], at: Pos | null): void
+  pictureError(): void
+}
+
+/** Picture bytes on their way into the document. A size is given when a copied picture keeps the size it had. */
+export interface PictureInput {
+  readonly blob: Blob
+  readonly widthPt?: number
+  readonly heightPt?: number
+}
+
+/**
+ * The last picture this app copied. The runtime's clipboard carries text only, so the bytes wait here and the
+ * clipboard holds a mark. It outlives a document, so a picture can be pasted into the next one.
+ */
+let heldPicture: (PictureInput & { readonly text: string }) | null = null
+
+/** Sets what a paste of the app's own mark brings back. Returns the plain text for the clipboard. */
+function holdClipboard(editor: EditingSurface): string {
+  const picture = editor.selectedPicture()
+  heldPicture = picture ? { ...picture, text: PICTURE_TEXT } : null
+  return picture ? PICTURE_TEXT : selectedText(editor.state)
+}
+
+function pictureFilesOf(data: DataTransfer | null): File[] {
+  return data ? [...data.files].filter(isPictureFile) : []
+}
+
+function carriesFiles(data: DataTransfer | null): boolean {
+  return data !== null && [...data.types].includes('Files')
+}
+
+/** Pictures on the system clipboard, where the runtime can read clipboard items. Empty when it cannot. */
+async function clipboardPictures(): Promise<Blob[]> {
+  const clipboard = navigator.clipboard
+  if (!clipboard || typeof clipboard.read !== 'function' || typeof ClipboardItem !== 'function') return []
+  try {
+    const out: Blob[] = []
+    for (const item of await clipboard.read()) {
+      const type = item.types.find((name) => name === 'image/png' || name === 'image/jpeg')
+      if (type) out.push(await item.getType(type))
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 export interface InputBinding {
@@ -172,14 +224,32 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   }
 
   function copySelection(): void {
-    const text = selectedText(editor.state)
+    const text = holdClipboard(editor)
     try {
       // Fires a copy event while the key gesture is current, so onCopy can fill clipboardData.
       document.execCommand('copy')
     } catch {
       // execCommand is missing in some runtimes; writeText below is the other path.
     }
-    if (navigator.clipboard) void navigator.clipboard.writeText(text).catch(() => {})
+    const clipboard = navigator.clipboard
+    if (!clipboard) return
+    const blob = heldPicture?.blob
+    if (blob && blob.type === 'image/png' && typeof ClipboardItem === 'function' && typeof clipboard.write === 'function') {
+      // Other apps get the picture where the runtime can write clipboard items. The mark rides along for this app.
+      const item = new ClipboardItem({ 'image/png': blob, 'text/plain': new Blob([text], { type: 'text/plain' }) })
+      void clipboard.write([item]).catch(() => clipboard.writeText(text).catch(() => {}))
+      return
+    }
+    void clipboard.writeText(text).catch(() => {})
+  }
+
+  function pasteFrom(text: string, files: readonly Blob[]): void {
+    const plan = pastePlan(text, files.length, heldPicture)
+    if (plan === 'none') return
+    goal = null
+    if (plan === 'files') editor.insertPictures(files.map((blob) => ({ blob })), null)
+    else if (plan === 'held' && heldPicture) editor.insertPictures([heldPicture], null)
+    else editor.run(insertText(text))
   }
 
   function applyClipboard(op: 'copy' | 'cut' | 'paste'): void {
@@ -187,14 +257,12 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
       pastePending = true
       const clipboard = navigator.clipboard
       if (!clipboard) return
-      void clipboard
-        .readText()
-        .then((text) => {
+      void clipboardPictures()
+        .then(async (files) => {
+          const text = files.length > 0 ? '' : await clipboard.readText()
           if (!pastePending) return
           pastePending = false
-          if (text.length === 0) return
-          goal = null
-          editor.run(insertText(text))
+          pasteFrom(text, files)
         })
         .catch(() => {
           pastePending = false
@@ -264,8 +332,16 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
 
   function onCompositionUpdate(event: CompositionEvent): void {
     if (mode.kind !== 'composing') return
-    if (event.data.length === 0) editor.setPreedit(null)
-    else editor.setPreedit({ kind: 'preedit', pos: mode.at, text: event.data })
+    // The runtime draws this string at the textarea, after this event returns. A paragraph preedit would show it twice.
+    if (event.data.length === 0) {
+      queueMicrotask(() => {
+        if (mode.kind === 'composing') editor.setPreedit(null)
+      })
+      return
+    }
+    queueMicrotask(() => {
+      if (mode.kind === 'composing') editor.syncCompositionCaret()
+    })
   }
 
   function onCompositionEnd(event: CompositionEvent): void {
@@ -283,13 +359,13 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
 
   function onCopy(event: ClipboardEvent): void {
     event.preventDefault()
-    event.clipboardData?.setData('text/plain', selectedText(editor.state))
+    event.clipboardData?.setData('text/plain', holdClipboard(editor))
   }
 
   function onCut(event: ClipboardEvent): void {
     event.preventDefault()
     if (fromKey) return
-    const text = selectedText(editor.state)
+    const text = holdClipboard(editor)
     event.clipboardData?.setData('text/plain', text)
     goal = null
     if (text.length > 0) editor.run(deleteSelection)
@@ -297,11 +373,37 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
 
   function onPaste(event: ClipboardEvent): void {
     event.preventDefault()
+    const files = pictureFilesOf(event.clipboardData)
     const text = event.clipboardData?.getData('text/plain') ?? ''
-    if (text.length === 0) return
+    if (files.length === 0 && text.length === 0) return
     pastePending = false
+    pasteFrom(text, files)
+  }
+
+  // Files dragged in from the system. The caret follows the pointer, so the drop lands where it shows.
+  function onDragOver(event: DragEvent): void {
+    if (!carriesFiles(event.dataTransfer) || mode.kind === 'composing') return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    const pos = editor.positionAtPoint(event.clientX, event.clientY)
+    const sel = editor.state.sel
+    if (!pos) return
+    const there = sel.kind === 'text' && sel.anchor.p === pos.p && sel.anchor.o === pos.o
+      && sel.head.p === pos.p && sel.head.o === pos.o
+    if (!there) editor.setTextSelection(pos, pos)
+  }
+
+  function onDrop(event: DragEvent): void {
+    if (!carriesFiles(event.dataTransfer) || mode.kind === 'composing') return
+    event.preventDefault()
+    cancelPicture()
+    endDrag()
+    const files = pictureFilesOf(event.dataTransfer)
+    const dropped = event.dataTransfer?.files.length ?? 0
+    editor.focus()
     goal = null
-    editor.run(insertText(text))
+    if (files.length > 0) editor.insertPictures(files.map((blob) => ({ blob })), editor.positionAtPoint(event.clientX, event.clientY))
+    if (files.length < dropped || dropped === 0) editor.pictureError()
   }
 
   function selectGesture(anchor: Pos, head: Pos, unit: DragUnit): void {
@@ -547,6 +649,10 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
     if (composing) editor.setPreedit(null)
   }
 
+  function onScroll(): void {
+    if (mode.kind === 'composing') editor.syncCompositionCaret()
+  }
+
   sink.addEventListener('keydown', onKeyDown, { signal })
   sink.addEventListener('beforeinput', onBeforeInput, { signal })
   sink.addEventListener('compositionstart', onCompositionStart, { signal })
@@ -557,6 +663,9 @@ export function attachInput(editor: EditingSurface, sink: HTMLTextAreaElement, h
   sink.addEventListener('paste', onPaste, { signal })
   sink.addEventListener('blur', onBlur, { signal })
   host.addEventListener('mousedown', onMouseDown, { capture: true, signal })
+  host.addEventListener('scroll', onScroll, { passive: true, signal })
+  host.addEventListener('dragover', onDragOver, { signal })
+  host.addEventListener('drop', onDrop, { signal })
 
   return {
     get composing() {

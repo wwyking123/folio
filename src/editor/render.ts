@@ -232,6 +232,24 @@ function firstLinePx(ctx: RenderContext, para: Paragraph, look: ParaLook): numbe
   return px(look.indent.firstLine)
 }
 
+/**
+ * Marker box and first-line content start in px. Clamping the marker to >= 0 keeps it inside `.page-body`'s clip;
+ * setting `paddingLeft` to `markerLeft + markerWidth` guarantees text and the caret never overlap the marker, even when
+ * a paragraph carries an explicit `left: 0` or `hanging: 0` indent.
+ */
+export function markerBoxPx(
+  leftPx: number,
+  hangingPx: number,
+): { readonly markerLeft: number; readonly markerWidth: number; readonly paddingLeft: number } {
+  const width = hangingPx > 0 ? hangingPx : px(18)
+  const markerLeft = hangingPx > 0 ? Math.max(0, leftPx - hangingPx) : Math.max(0, leftPx)
+  return {
+    markerLeft,
+    markerWidth: width,
+    paddingLeft: markerLeft + width,
+  }
+}
+
 function applyParaBox(el: HTMLElement, ctx: RenderContext, para: Paragraph, beforePx?: number): ParaLook {
   const look = ctx.paraLook(para)
   const before = beforePx ?? px(look.spacing.before)
@@ -243,8 +261,9 @@ function applyParaBox(el: HTMLElement, ctx: RenderContext, para: Paragraph, befo
   el.style.paddingTop = `${before}px`
   el.style.paddingBottom = `${after}px`
   el.style.paddingRight = `${right}px`
-  if (marker && hanging > 0) {
-    el.style.paddingLeft = `${left}px`
+  if (marker) {
+    const box = markerBoxPx(left, hanging)
+    el.style.paddingLeft = `${box.paddingLeft}px`
     el.style.textIndent = '0'
   } else {
     el.style.paddingLeft = `${left + hanging}px`
@@ -351,6 +370,35 @@ function appendText(parent: HTMLElement, ctx: RenderContext, para: Paragraph, pi
   parent.append(span)
 }
 
+export interface PreeditRunStyle {
+  readonly slot: ScriptSlot
+  readonly fontFamily: string
+  readonly fontSizePx: number
+  readonly fontWeight: '400' | '700'
+  readonly fontStyle: 'normal' | 'italic'
+  readonly letterSpacingPx: number
+  readonly color: string
+  readonly vertAlign: 'super' | 'sub' | undefined
+}
+
+export function preeditRunStyle(ctx: RenderContext, para: Paragraph, marks: Marks, text: string): PreeditRunStyle {
+  const look = ctx.look(para, marks)
+  const slot: ScriptSlot = isMostlyEastAsian(text) ? 'eastAsia' : 'ascii'
+  const rawFamily = slot === 'eastAsia' ? look.fonts.eastAsia : look.fonts.ascii
+  const family = paintedFamily(ctx, rawFamily, slot)
+  const sizePx = px(look.sizePt)
+  return {
+    slot,
+    fontFamily: ctx.fontStack(family),
+    fontSizePx: marks.vertAlign ? sizePx * 0.7 : sizePx,
+    fontWeight: look.bold ? '700' : '400',
+    fontStyle: look.italic ? 'italic' : 'normal',
+    letterSpacingPx: look.charSpacingPt ? px(look.charSpacingPt) : 0,
+    color: marks.link ? '#0563c1' : look.color !== 'auto' ? `#${look.color}` : '#222',
+    vertAlign: marks.vertAlign === 'super' || marks.vertAlign === 'sub' ? marks.vertAlign : undefined,
+  }
+}
+
 function appendPreedit(parent: HTMLElement, ctx: RenderContext, para: Paragraph, deco: Decoration): void {
   const span = document.createElement('span')
   span.className = 'preedit'
@@ -382,11 +430,10 @@ function renderParagraph(para: Paragraph, ctx: RenderContext, deco: Decoration |
     span.className = 'marker'
     span.contentEditable = 'false'
     span.textContent = marker
-    const left = px(look.indent.left)
-    const hanging = px(look.indent.hanging)
-    span.style.left = `${Math.max(0, left - hanging)}px`
+    const box = markerBoxPx(px(look.indent.left), px(look.indent.hanging))
+    span.style.left = `${box.markerLeft}px`
     span.style.top = `${before}px`
-    if (hanging > 0) span.style.width = `${hanging}px`
+    span.style.width = `${box.markerWidth}px`
     const run = ctx.look(para, {})
     applyRun(span, ctx, para, run, run.fonts.eastAsia, {})
     el.append(span)

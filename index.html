@@ -61,6 +61,109 @@
         min-height: 0;
         height: auto;
       }
+      /* #pages holds one host per open document, stacked. Only the active tab's host is visible. A background host
+         stays laid out (visibility, not display) so a pagination still running there keeps measuring real heights. */
+      body.shell #pages { position: relative }
+      #pages > .doc-host {
+        position: absolute;
+        inset: 0;
+        height: auto;
+      }
+      #pages > .doc-host.background {
+        visibility: hidden;
+        pointer-events: none;
+        z-index: 0;
+      }
+      #pages > .doc-host.active { z-index: 1 }
+      .tabs {
+        flex: none;
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        min-height: 34px;
+        padding: 6px 8px 0;
+        box-sizing: border-box;
+        font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
+        color: var(--text-muted);
+        background: var(--status-bg);
+        border-bottom: 1px solid var(--chrome-border);
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .tabs.covered { pointer-events: none; opacity: .6 }
+      .tabs-list {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        min-width: 0;
+        overflow: hidden;
+      }
+      .tab {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        box-sizing: border-box;
+        width: 200px;
+        min-width: 90px;
+        flex: 0 1 200px;
+        height: 28px;
+        margin-bottom: -1px;
+        padding: 0 4px 0 10px;
+        border: 1px solid transparent;
+        border-bottom: 0;
+        border-radius: 7px 7px 0 0;
+        cursor: default;
+      }
+      .tab:hover { background: var(--control-hover) }
+      .tab.active {
+        color: var(--text);
+        background: var(--chrome-bg);
+        border-color: var(--chrome-border);
+        height: 29px;
+      }
+      .tab-dirty {
+        flex: none;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0;
+      }
+      .tab.dirty .tab-dirty { opacity: .85 }
+      .tab-label {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .tab-close, .tab-new {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        color: inherit;
+        background: transparent;
+        border: 0;
+        border-radius: 5px;
+        cursor: default;
+      }
+      .tab-close { width: 20px; height: 20px }
+      .tab-close svg { width: 14px; height: 14px }
+      .tab-close:hover, .tab-new:hover { background: var(--control-active) }
+      .tab-new {
+        width: 26px;
+        height: 26px;
+        margin: 0 0 2px 2px;
+      }
+      .tab-new svg { width: 16px; height: 16px }
+      .tab-close:focus { outline: none }
+      .tab-new:focus-visible, .tab-close:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
       .toolbar, .tablebar, .status, .open-error {
         flex: none;
         font: 13px/1.4 system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
@@ -841,6 +944,7 @@
     </style>
   </head>
   <body>
+    <div id="tabs" class="tabs"></div>
     <div id="toolbar" class="toolbar" role="toolbar"></div>
     <p id="open-error" class="open-error" role="alert" hidden></p>
     <div id="pages"></div>

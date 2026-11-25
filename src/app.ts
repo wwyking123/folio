@@ -1,4 +1,4 @@
-// Owns the open file and the window chrome. Dirty is editor.state.doc !== file.saved.
+// Owns the open documents, one tab each, and the window chrome. A tab is dirty when its editor.state.doc !== file.saved.
 import { window as appWindow } from 'acde:window'
 import { createInterface } from './automation/api.ts'
 import type { Word } from './automation/api.ts'
@@ -16,8 +16,9 @@ import { ensurePrintFonts } from './fonts.ts'
 import { locale, t } from './i18n.ts'
 import type { Doc, Hex, HighlightName, ParaId, Pt, StyleId } from './model.ts'
 import { createStatus } from './ui/status.ts'
+import { createTabs } from './ui/tabs.ts'
 import { createToolbar } from './ui/toolbar.ts'
-import { canSave, fileHandleFromRequest, formatTitle, isAbort, isDirty } from './ui/text.ts'
+import { afterClose, canSave, cycleTab, fileHandleFromRequest, formatTitle, isAbort, isDirty, nextUntitled } from './ui/text.ts'
 import { isDialogOpen } from './ui/dialog.ts'
 import { openPageSetup } from './ui/page-setup.ts'
 import { openParagraph } from './ui/paragraph.ts'
@@ -26,6 +27,7 @@ import { createUnsavedDialog } from './ui/unsaved.ts'
 import type { UnsavedChoice } from './ui/unsaved.ts'
 import { createFindBar } from './ui/find-bar.ts'
 import type { FindBar } from './ui/find-bar.ts'
+import type { FileOp } from './editor/input.ts'
 import { describePrintFailure, mountPreview, pdfFileName, previewDpi, PreviewMachine } from './ui/preview.ts'
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -38,6 +40,7 @@ export interface OpenFile {
 }
 
 export interface WordApp {
+  /** The active tab's editor. It changes when another tab is chosen. */
   readonly editor: Editor
   /** `window.word`. JSON in, JSON out, in every build. */
   readonly word: Word
@@ -118,20 +121,27 @@ export type PrintSessionFace = {
   readonly bytes: number
 }
 
-type Pending = {
-  next: () => void
-  onCancel?: () => void
+/** One open document: its editor, the host the editor draws into, and the file behind it. */
+type Tab = {
+  readonly id: number
+  readonly editor: Editor
+  readonly host: HTMLElement
+  file: OpenFile
+  /** A new document nobody has opened a file into yet. Open fills it in place instead of adding a tab while it is clean. */
+  blank: boolean
 }
 
 export async function boot(host: HTMLElement): Promise<WordApp> {
   document.body.classList.add('shell')
   const engine = await loadEngine()
   const platform = detectPlatform(navigator.platform, navigator.userAgent)
-  let editor: Editor | null = null
-  let file: OpenFile | null = null
+  const tabs: Tab[] = []
+  let active: Tab | null = null
+  let nextTabId = 1
   let titleShown = ''
   let tail: Promise<void> = Promise.resolve()
-  let pending: Pending | null = null
+  let resolveAsk: ((choice: UnsavedChoice) => void) | null = null
+  let closingWindow = false
   let lastPageSetupMs = 0
   // listMarkers already caches on the document. read.ts keeps its outline only while the map
   // object is the same, so this map is what `markers()` hands out for a given Doc.
@@ -143,12 +153,25 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
 
   const toolbarRoot = required('#toolbar')
   const statusRoot = required('#status')
+  const tabStrip = createTabs(required('#tabs'), {
+    onSelect(id) {
+      const tab = tabs.find(item => item.id === id)
+      if (tab) activate(tab)
+    },
+    onClose(id) {
+      const tab = tabs.find(item => item.id === id)
+      if (tab) void closeTab(tab)
+    },
+    onNew() {
+      newDocument()
+    },
+  })
   const toolbar = createToolbar(toolbarRoot, platform, {
     onNew() {
-      confirmReplace(() => newDocument())
+      newDocument()
     },
     onOpen() {
-      confirmReplace(() => { void openWithPicker() })
+      void openWithPicker()
     },
     onSave() {
       void saveFromToolbar(false)
@@ -271,11 +294,15 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     onDeleteTable() {
       edit(() => { current().run(deleteEnclosingTable()) })
     },
-  }, host)
+  }, () => scroller())
   const status = createStatus(statusRoot, (zoom) => {
     edit(() => { current().setZoom(zoom) })
   })
-  const dialog = createUnsavedDialog((choice) => { void answer(choice) })
+  const dialog = createUnsavedDialog((choice) => {
+    const resolve = resolveAsk
+    resolveAsk = null
+    resolve?.(choice)
+  })
   const pages = host
   const machine = new PreviewMachine<PrintLayout>()
   let heldScroll = { top: 0, left: 0 }
@@ -303,13 +330,22 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   })
 
   function current(): Editor {
-    if (!editor) throw new Error('editor is not ready')
-    return editor
+    if (!active) throw new Error('editor is not ready')
+    return active.editor
   }
 
-  // boot assigns `editor` once. load() replaces `source` on that object, so current() is the
-  // same Editor for the life of the page. Calls still go through current(), and the change
-  // subscription moves if a later edit of boot makes current() return another object.
+  function activeTab(): Tab {
+    if (!active) throw new Error('editor is not ready')
+    return active
+  }
+
+  /** The active tab's page scroller. */
+  function scroller(): HTMLElement {
+    return active?.host ?? pages
+  }
+
+  // Each tab has its own Editor, so current() changes when another tab is chosen. The automation
+  // change subscription follows it: activate() rebinds and tells the listeners.
   function rebindWatch(): void {
     const next = current()
     if (next === watchedEditor) return
@@ -327,8 +363,10 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   }
 
   function renderChrome(): void {
-    const currentEditor = current()
-    const name = file?.name ?? t('untitled')
+    const tab = activeTab()
+    const currentEditor = tab.editor
+    const file = tab.file
+    const name = file.name
     const title = formatTitle(name, isDirty(currentEditor.state.doc, file), t('title'))
     if (title !== titleShown) {
       titleShown = title
@@ -342,6 +380,10 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       canSave(currentEditor.state.doc, file),
     )
     status.render(currentEditor.status())
+    tabStrip.render(
+      tabs.map(item => ({ id: item.id, name: item.file.name, dirty: isDirty(item.editor.state.doc, item.file) })),
+      tab.id,
+    )
   }
 
   function edit(run: () => void): void {
@@ -350,66 +392,180 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     current().focus()
   }
 
-  function adopt(opened: Opened, handle: FileSystemFileHandle | null, name: string): void {
-    const currentEditor = current()
-    currentEditor.load(opened)
-    file = { handle, name, saved: currentEditor.state.doc }
+  /** Mounts a new editor in its own host at the end of the strip. The caller activates it. */
+  function createTab(opened: Opened, handle: FileSystemFileHandle | null, name: string, blank: boolean): Tab {
+    const tabHost = document.createElement('div')
+    tabHost.className = 'doc-host background'
+    pages.append(tabHost)
+    const tabEditor = Editor.mount(tabHost, opened, { locale: locale === 'zh' ? 'zh' : 'en' })
+    const tab: Tab = { id: nextTabId++, editor: tabEditor, host: tabHost, file: { handle, name, saved: tabEditor.state.doc }, blank }
+    tabEditor.on('change', () => { if (active) renderChrome() })
+    tabEditor.onFile((op) => { fileOp(op) })
+    tabEditor.onPictureError(() => showBand(t('image.error')))
+    tabEditor.on('change', () => { if (tab === active) findBar?.noteDocument() })
+    tabEditor.onFind((op) => { if (tab === active) findBar?.command(op) })
+    tabs.push(tab)
+    return tab
+  }
+
+  /** Shows `tab` and hides the others. Each host keeps its own scroll position while it is hidden. */
+  function activate(tab: Tab): void {
+    if (!tabs.includes(tab)) return
+    const changed = active !== tab
+    // The bar's matches and tints belong to the editor it searched. Close it on the old tab before switching.
+    if (changed && active) findBar?.close(false)
+    active = tab
+    for (const item of tabs) {
+      item.host.classList.toggle('active', item === tab)
+      item.host.classList.toggle('background', item !== tab)
+    }
+    if (changed) {
+      clearError()
+      if (changeListeners.size > 0) {
+        rebindWatch()
+        for (const listener of [...changeListeners]) listener()
+      }
+    }
+    renderChrome()
+    tab.editor.focus()
+  }
+
+  function fileOp(op: FileOp): void {
+    if (isDialogOpen() || previewCovers()) return
+    switch (op) {
+      case 'save':
+      case 'saveAs':
+        void saveFromToolbar(op === 'saveAs')
+        return
+      case 'new':
+        newDocument()
+        return
+      case 'open':
+        void openWithPicker()
+        return
+      case 'closeTab':
+        void closeTab(activeTab())
+        return
+      case 'nextTab':
+      case 'prevTab':
+        activate(cycleTab(tabs, activeTab(), op === 'nextTab' ? 1 : -1))
+        return
+    }
+  }
+
+  function previewCovers(): boolean {
+    const phase = machine.phase
+    return phase === 'preparing' || phase === 'cancelling' || phase === 'open' || phase === 'exporting'
+  }
+
+  function adopt(tab: Tab, opened: Opened, handle: FileSystemFileHandle | null, name: string): void {
+    tab.editor.load(opened)
+    tab.file = { handle, name, saved: tab.editor.state.doc }
+    tab.blank = false
     clearError()
     renderChrome()
   }
 
   function newDocument(): void {
-    adopt(engine.blank(), null, t('untitled'))
-    current().focus()
+    activate(createTab(engine.blank(), null, nextUntitled(tabs.map(item => item.file.name), t), true))
   }
 
-  // New, Open and a system open ask before replacing a dirty document. Closing asks in requestClose.
-  // openBytes is the test hook, so it passes ask false and replaces immediately.
-  function confirmReplace(next: () => void, onCancel?: () => void, ask = true): void {
-    const currentEditor = current()
-    if (ask && file && isDirty(currentEditor.state.doc, file)) {
-      pending = { next, onCancel }
-      if (!dialog.open) dialog.ask(file.name)
+  /** Where an opened file goes: the active tab when it is a clean new document, else a new tab. */
+  function openInto(opened: Opened, handle: FileSystemFileHandle | null, name: string): void {
+    const tab = activeTab()
+    if (tab.blank && !isDirty(tab.editor.state.doc, tab.file)) {
+      adopt(tab, opened, handle, name)
       return
     }
-    next()
+    activate(createTab(opened, handle, name, false))
   }
 
+  function tabDirty(tab: Tab): boolean {
+    return isDirty(tab.editor.state.doc, tab.file)
+  }
+
+  function askUnsaved(tab: Tab): Promise<UnsavedChoice> {
+    return new Promise((resolve) => {
+      resolveAsk = resolve
+      dialog.ask(tab.file.name)
+    })
+  }
+
+  /** Saves `tab` to its file and waits for every queued save. True when it is clean afterwards. */
+  async function saveTab(tab: Tab): Promise<boolean> {
+    const ok = await enqueueSave(tab, false)
+    await drain()
+    return ok && !tabDirty(tab)
+  }
+
+  /** Closes one tab, asking first when it has unsaved changes. The last tab gives way to a new blank document. */
+  async function closeTab(tab: Tab): Promise<void> {
+    if (dialog.open || isDialogOpen() || previewCovers() || closingWindow) return
+    if (tabDirty(tab)) {
+      activate(tab)
+      const choice = await askUnsaved(tab)
+      if (choice === 'cancel') {
+        current().focus()
+        return
+      }
+      if (choice === 'save' && !(await saveTab(tab))) {
+        current().focus()
+        return
+      }
+    }
+    removeTab(tab)
+  }
+
+  function removeTab(tab: Tab): void {
+    const at = tabs.indexOf(tab)
+    if (at < 0) return
+    const next = afterClose(tabs, tab, activeTab())
+    if (next === null) {
+      const fresh = createTab(engine.blank(), null, nextUntitled([], t), true)
+      tabs.splice(tabs.indexOf(tab), 1)
+      activate(fresh)
+    } else {
+      tabs.splice(at, 1)
+      activate(next)
+    }
+    tab.editor.destroy()
+    tab.host.remove()
+    renderChrome()
+  }
+
+  // The window closes when no tab is dirty. Otherwise each dirty tab comes forward and asks in turn;
+  // Cancel, or a save that does not finish, keeps the window. close() does not ask again.
   function requestClose(): boolean {
-    if (dialog.open) return false
-    const currentEditor = current()
-    if (!file || !isDirty(currentEditor.state.doc, file)) return true
-    pending = null
-    dialog.ask(file.name)
+    if (dialog.open || closingWindow) return false
+    if (!tabs.some(tabDirty)) return true
+    void closeWindow()
     return false
   }
 
-  async function answer(choice: UnsavedChoice): Promise<void> {
-    const job = pending
-    pending = null
-    if (choice === 'cancel') {
-      job?.onCancel?.()
-      current().focus()
-      return
+  async function closeWindow(): Promise<void> {
+    closingWindow = true
+    try {
+      for (const tab of [...tabs]) {
+        if (!tabs.includes(tab) || !tabDirty(tab)) continue
+        activate(tab)
+        const choice = await askUnsaved(tab)
+        if (choice === 'cancel') {
+          current().focus()
+          return
+        }
+        if (choice === 'save' && !(await saveTab(tab))) {
+          current().focus()
+          return
+        }
+      }
+    } finally {
+      closingWindow = false
     }
-    if (choice === 'discard') {
-      if (job) job.next()
-      else appWindow.close()
-      return
-    }
-    const ok = await enqueueSave(false)
-    await drain()
-    if (!ok || isDirty(current().state.doc, file)) {
-      if (!ok) job?.onCancel?.()
-      current().focus()
-      return
-    }
-    if (job) job.next()
-    else appWindow.close()
+    appWindow.close()
   }
 
-  function enqueueSave(asNew: boolean): Promise<boolean> {
-    const run = tail.then(() => performSave(asNew))
+  function enqueueSave(tab: Tab, asNew: boolean): Promise<boolean> {
+    const run = tail.then(() => performSave(tab, asNew))
     tail = run.then(() => undefined, () => undefined)
     return run
   }
@@ -424,15 +580,18 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   }
 
   async function saveFromToolbar(asNew: boolean): Promise<void> {
-    const ok = await enqueueSave(asNew)
-    if (ok) current().focus()
+    const tab = activeTab()
+    const ok = await enqueueSave(tab, asNew)
+    if (ok && tab === active) current().focus()
   }
 
-  async function performSave(asNew: boolean): Promise<boolean> {
-    const currentEditor = current()
+  // The tab is fixed when the save is queued, so choosing another tab while the picker is up still saves this one.
+  async function performSave(tab: Tab, asNew: boolean): Promise<boolean> {
+    if (!tabs.includes(tab)) return false
+    const currentEditor = tab.editor
     const doc = currentEditor.state.doc
-    const open = file
-    if (!asNew && open?.handle && doc === open.saved) return true
+    const open = tab.file
+    if (!asNew && open.handle && doc === open.saved) return true
     let bytes: Uint8Array
     try {
       bytes = currentEditor.source.save(doc)
@@ -441,8 +600,8 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       renderChrome()
       return false
     }
-    const name = open?.name ?? t('untitled')
-    let handle = !asNew && open?.handle ? open.handle : null
+    const name = open.name
+    let handle = !asNew && open.handle ? open.handle : null
     if (handle) {
       const wrote = await tryWrite(handle, bytes)
       if (!wrote) handle = null
@@ -468,13 +627,21 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       handle = picked
     }
     const writtenName = handle.name || name
-    file = { handle, name: writtenName, saved: doc }
+    tab.file = { handle, name: writtenName, saved: doc }
     clearError()
     renderChrome()
     return true
   }
 
   async function openHandle(handle: FileSystemFileHandle): Promise<void> {
+    // A file that is already open comes forward instead of opening twice.
+    for (const tab of tabs) {
+      const open = tab.file.handle
+      if (open && (open === handle || await sameEntry(open, handle))) {
+        activate(tab)
+        return
+      }
+    }
     let bytes: Uint8Array
     let name: string
     try {
@@ -487,7 +654,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       return
     }
     try {
-      adopt(engine.open(bytes), handle, name)
+      openInto(engine.open(bytes), handle, name)
     } catch (error) {
       if (error instanceof OpenError) {
         showOpenError(error.reason)
@@ -509,7 +676,9 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       const handle = picked[0]
       if (!handle) return
       const blob = await handle.getFile()
-      const media = await current().source.addMedia(blob)
+      const target = current()
+      const media = await target.source.addMedia(blob)
+      if (target !== current()) return
       edit(() => {
         current().run(insertImage({
           key: media.key,
@@ -544,17 +713,16 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   }
 
   function openBytes(bytes: Uint8Array, name?: string): Promise<void> {
+    // The test hook replaces the active tab's document at once, without asking.
     return new Promise((resolve, reject) => {
-      confirmReplace(() => {
-        try {
-          adopt(engine.open(bytes), null, name && name.length > 0 ? name : t('openedName'))
-        } catch (error) {
-          if (error instanceof OpenError) showOpenError(error.reason)
-          reject(error)
-          return
-        }
-        void whenLaidOut(current()).then(resolve, reject)
-      }, undefined, false)
+      try {
+        adopt(activeTab(), engine.open(bytes), null, name && name.length > 0 ? name : t('openedName'))
+      } catch (error) {
+        if (error instanceof OpenError) showOpenError(error.reason)
+        reject(error)
+        return
+      }
+      void whenLaidOut(current()).then(resolve, reject)
     })
   }
 
@@ -577,20 +745,13 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     return ''
   }
 
-  const opened = engine.blank()
-  editor = Editor.mount(host, opened, { locale: locale === 'zh' ? 'zh' : 'en' })
-  file = { handle: null, name: t('untitled'), saved: editor.state.doc }
-  findBar = createFindBar(editor, pages)
-  editor.on('change', renderChrome)
-  editor.on('change', () => findBar?.noteDocument())
-  editor.onFind((op) => findBar?.command(op))
-  editor.onFile((op) => { void saveFromToolbar(op === 'saveAs') })
-  renderChrome()
+  activate(createTab(engine.blank(), null, nextUntitled([], t), true))
+  findBar = createFindBar(() => current(), pages)
   // A file the user opened with this app arrives as a system request. The runtime holds it until a handler exists.
   appWindow.on('request', request => {
     const handle = fileHandleFromRequest(request)
     if (!handle) return
-    confirmReplace(() => { void openHandle(handle).then(() => current().focus()) })
+    void openHandle(handle).then(() => current().focus())
   })
   // Return false at once. The runtime closes a dirty window if beforeclose is still pending after 3 seconds.
   // close() does not ask again, so Save and Don't save close the window themselves.
@@ -598,18 +759,21 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
 
   function concealEditing(): void {
     toolbar.setCovered(true)
+    tabStrip.setCovered(true)
     pages.hidden = true
   }
 
   function revealEditing(scroll: { top: number; left: number }): void {
     preview.hide()
     toolbar.setCovered(false)
+    tabStrip.setCovered(false)
     pages.hidden = false
+    const view = scroller()
     const restore = (): void => {
       const phase = machine.phase
       if (phase !== 'closed' && phase !== 'unusable' && phase !== 'failed') return
-      pages.scrollTop = scroll.top
-      pages.scrollLeft = scroll.left
+      view.scrollTop = scroll.top
+      view.scrollLeft = scroll.left
     }
     restore()
     // The page view may relayout on the frame it becomes visible and clamp the position.
@@ -679,7 +843,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
     findBar?.close(false)
     const editorNow = current()
     const doc = editorNow.state.doc
-    heldScroll = { top: pages.scrollTop, left: pages.scrollLeft }
+    heldScroll = { top: scroller().scrollTop, left: scroller().scrollLeft }
     concealEditing()
     preview.showPreparing()
     clearError()
@@ -732,7 +896,7 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       failPreview(error)
       return
     }
-    const suggested = pdfFileName(file?.name ?? t('untitled'))
+    const suggested = pdfFileName(activeTab().file.name)
     try {
       const picked = await pickPdf(suggested)
       if (machine.phase !== 'exporting') return
@@ -892,10 +1056,10 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
       return editorNow().positionAtPoint(clientX, clientY)
     },
     file() {
-      const open = file
+      const open = activeTab().file
       const live = editorNow()
       return {
-        name: open?.name ?? t('untitled'),
+        name: open.name,
         dirty: isDirty(live.state.doc, open),
         session: live.source,
       }
@@ -924,7 +1088,9 @@ export async function boot(host: HTMLElement): Promise<WordApp> {
   const word = createInterface(wordHost)
 
   return {
-    editor,
+    get editor() {
+      return current()
+    },
     word,
     openBytes,
     save: timedSave,
@@ -943,6 +1109,16 @@ function required(selector: string): HTMLElement {
   const el = document.querySelector(selector)
   if (!(el instanceof HTMLElement)) throw new Error(`missing ${selector}`)
   return el
+}
+
+/** The two handles name one file. A runtime without isSameEntry treats different handle objects as different files. */
+async function sameEntry(a: FileSystemFileHandle, b: FileSystemFileHandle): Promise<boolean> {
+  if (typeof a.isSameEntry !== 'function') return false
+  try {
+    return await a.isSameEntry(b)
+  } catch {
+    return false
+  }
 }
 
 async function tryWrite(handle: FileSystemFileHandle, bytes: Uint8Array): Promise<boolean> {

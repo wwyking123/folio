@@ -303,3 +303,67 @@ test('blank imports an empty document through the same path', () => {
     opened?.source.free()
   }
 })
+
+test('addMedia mounts the probe image while decoding and removes it afterwards', async () => {
+  const png = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02,
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x26, 0x93, 0x09, 0x29,
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+  ])
+  const children: unknown[] = []
+  let mounted = false
+  const prevBitmap = globalThis.createImageBitmap
+  const prevImage = globalThis.Image
+  const prevDoc = globalThis.document
+  class ConnectedOnlyImage {
+    isConnected = false
+    naturalWidth = 4
+    naturalHeight = 2
+    style = { cssText: '' }
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    setAttribute(): void {}
+    remove(): void {
+      this.isConnected = false
+      const idx = children.indexOf(this)
+      if (idx >= 0) children.splice(idx, 1)
+    }
+    set src(_url: string) {
+      if (this.isConnected) queueMicrotask(() => this.onload?.())
+    }
+  }
+  Object.assign(globalThis, {
+    createImageBitmap: async () => {
+      throw new Error('NotSupportedError')
+    },
+    Image: ConnectedOnlyImage,
+    document: {
+      body: {
+        append(node: ConnectedOnlyImage) {
+          node.isConnected = true
+          mounted = true
+          children.push(node)
+        },
+      },
+    },
+  })
+  let opened: Opened | undefined
+  try {
+    opened = engine.blank()
+    const media = await opened.source.addMedia(new Blob([png], { type: 'image/png' }))
+    assert.equal(mounted, true)
+    assert.equal(children.length, 0)
+    assert.equal(media.widthPt, 3)
+    assert.equal(media.heightPt, 1.5)
+  } finally {
+    opened?.source.free()
+    if (prevBitmap === undefined) delete (globalThis as Record<string, unknown>).createImageBitmap
+    else globalThis.createImageBitmap = prevBitmap
+    if (prevImage === undefined) delete (globalThis as Record<string, unknown>).Image
+    else globalThis.Image = prevImage
+    if (prevDoc === undefined) delete (globalThis as Record<string, unknown>).document
+    else globalThis.document = prevDoc
+  }
+})

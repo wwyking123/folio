@@ -14,6 +14,7 @@ const STRINGS = {
     discard: "Don't save",
     cancel: 'Cancel',
     ask: 'Save changes to {name}?',
+    closeTab: 'Close {name}',
     error: 'Could not save this document.',
     undo: 'Undo',
     redo: 'Redo',
@@ -32,6 +33,7 @@ const STRINGS = {
     discard: '不保存',
     cancel: '取消',
     ask: '是否保存对 {name} 的更改？',
+    closeTab: '关闭 {name}',
     error: '无法保存此文档。',
     undo: '撤销',
     redo: '重做',
@@ -384,24 +386,27 @@ await check('beforeclose on a dirty document keeps the window and the three butt
   await until(`document.querySelector('.unsaved').hidden === true`, { label: 'cancel' })
   assert(pageAlive() && dirty() === true, 'Cancel left the dirty document open')
   const text = evaluate(`window.__project().body.map((block) => block.text || '').join('\\n')`)
-  act(fileMenuItem(ui.new), 'click')
-  assert(dialogInfo() && dialogInfo().hidden === false, 'New on a dirty document asks')
+  // Closing the document's tab asks the same question. The last tab gives way to a new untitled one.
+  const closeTab = (name) => act(buttonRef(fill(ui.closeTab, { name }), false), 'click')
+  closeTab('saved-b')
+  assert(dialogInfo() && dialogInfo().hidden === false, 'closing a dirty tab asks')
   act(buttonRef(ui.cancel, true), 'click')
-  await until(`document.querySelector('.unsaved').hidden === true`, { label: 'new cancel' })
+  await until(`document.querySelector('.unsaved').hidden === true`, { label: 'close cancel' })
   const still = evaluate(`window.__project().body.map((block) => block.text || '').join('\\n')`)
   assert(still === text, 'Cancel kept the document')
+  assert(evaluate(`document.querySelectorAll('#tabs .tab').length`) === 1, 'Cancel kept the tab')
   const snap = project()
   chooseSave(pathDialog)
-  act(fileMenuItem(ui.new), 'click')
+  closeTab('saved-b')
   act(buttonRef(ui.save, true), 'click')
-  await until(`!document.title.startsWith('• ') && document.title.includes(${JSON.stringify(ui.untitled)})`, { timeout: 20000, label: 'saved then new' })
+  await until(`!document.title.startsWith('• ') && document.title.includes(${JSON.stringify(ui.untitled)})`, { timeout: 20000, label: 'saved then closed' })
   await openDocument(readFileSync(pathDialog).toString('base64'), 'dialog.docx')
   same(project(), snap, 'the dialog Save button wrote the document')
   act(sink(), 'focus')
   act(sink(), 'type', 'Q')
-  act(fileMenuItem(ui.new), 'click')
+  closeTab('dialog')
   act(buttonRef(ui.discard, true), 'click')
-  await until(`!document.title.startsWith('• ') && document.title.includes(${JSON.stringify(ui.untitled)})`, { label: 'discard then new' })
+  await until(`!document.title.startsWith('• ') && document.title.includes(${JSON.stringify(ui.untitled)})`, { label: 'discard then closed' })
   const fresh = evaluate(`window.__project().body.map((block) => block.text || '').join('')`)
   assert(!fresh.includes('Q'), 'Don\'t save dropped the edit')
 })
